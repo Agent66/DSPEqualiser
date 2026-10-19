@@ -278,9 +278,9 @@ python -m unittest discover -s tests -p "test_*.py"
 
 ---
 
-## Project Report Guide
+## Technical Highlights & Architectural Notes
 
-When presenting or writing your report on this implementation, emphasize the following points:
+Key engineering achievements and technical design choices in this implementation:
 
 ### 1. Preservation of Continuous DSP Mathematical State
 - Standard digital filtering often fails when processing audio in discrete chunks due to transient boundary clicks caused by filter state resets.
