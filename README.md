@@ -150,9 +150,7 @@ Speak into the microphone or switch to Demo Music on the sender side — you wil
 
 ---
 
-## What to Say in Your Project Report
-
-When presenting or writing your report on this implementation, emphasize the following points:
+###PROJECT REPORT
 
 ### 1. Retains All Original DSP Qualities
 - The sender pipeline retains the exact mathematical DSP core: continuous-time sampling, Hann windowing, fast Fourier transform (FFT), 8-band biquad cascade filtering with persistent SOS state, and soft saturation limiting.
