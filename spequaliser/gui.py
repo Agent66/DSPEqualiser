@@ -117,10 +117,21 @@ class EqualizerApp:
         self.pan_start_xlim = None
         self.pan_start_ylim = None
 
-        # High-Resolution Scrolling Spectrogram Buffer (200 frequency bins x 140 time frames)
-        self.specgram_bins = 200
-        self.specgram_frames = 140
+        # High-Resolution Scrolling Spectrogram Buffer (120 frequency bins x 100 time frames)
+        self.specgram_bins = 120
+        self.specgram_frames = 100
         self.specgram_buffer = np.full((self.specgram_bins, self.specgram_frames), -80.0, dtype=np.float32)
+
+        # Oscilloscope downsampling factor (512 points for silky-smooth waveform rendering)
+        self.wave_downsample = 4
+
+        # Blitting & render performance cache
+        self.bg_cache_valid = False
+        self.bg_wave = None
+        self.bg_spec = None
+        self.bg_specgram = None
+        self._frame_count = 0
+        self._is_rendering = False
 
         # Matplotlib frequency grid for theoretical curves (log-spaced)
         self.f_eval = np.logspace(np.log10(20), np.log10(STANDARD_SAMPLE_RATE / 2.0 - 50.0), 300)
@@ -507,9 +518,10 @@ class EqualizerApp:
         self.ax_wave.tick_params(colors=COLOR_TEXT_MUTED, labelsize=7)
         self.ax_wave.grid(True, color="#1B283E", linestyle="--", linewidth=0.5)
 
-        time_axis_ms = np.arange(DEFAULT_BLOCK_SIZE) / STANDARD_SAMPLE_RATE * 1000.0
-        self.line_wave_in, = self.ax_wave.plot(time_axis_ms, np.zeros(DEFAULT_BLOCK_SIZE), color="#64748B", lw=0.9, label="Raw Input", alpha=0.6)
-        self.line_wave_out, = self.ax_wave.plot(time_axis_ms, np.zeros(DEFAULT_BLOCK_SIZE), color=COLOR_BLUE, lw=1.2, label="Processed")
+        wave_indices = np.arange(0, DEFAULT_BLOCK_SIZE, self.wave_downsample)
+        time_axis_ms = wave_indices / STANDARD_SAMPLE_RATE * 1000.0
+        self.line_wave_in, = self.ax_wave.plot(time_axis_ms, np.zeros_like(wave_indices, dtype=np.float32), color="#64748B", lw=0.9, label="Raw Input", alpha=0.6, animated=True)
+        self.line_wave_out, = self.ax_wave.plot(time_axis_ms, np.zeros_like(wave_indices, dtype=np.float32), color=COLOR_BLUE, lw=1.2, label="Processed", animated=True)
         self.ax_wave.legend(loc="upper right", fontsize=7, facecolor=COLOR_PANEL_BG, edgecolor=COLOR_PANEL_BORDER, labelcolor=COLOR_TEXT_MAIN)
 
         # Subplot 2 (Bottom Left): Feature 6 - Before vs. After Spectrum Line Graph
@@ -531,22 +543,22 @@ class EqualizerApp:
         self.ax_spec.axvspan(300, 3400, color="#10B981", alpha=0.04, label="Voice Formants")
 
         init_freqs = np.fft.rfftfreq(DEFAULT_BLOCK_SIZE, 1.0 / STANDARD_SAMPLE_RATE)
-        self.line_spec_in, = self.ax_spec.plot(init_freqs, np.full_like(init_freqs, -80.0), color=COLOR_RED, lw=1.1, ls="--", label="Before (Noisy)", alpha=0.85)
-        self.line_spec_out, = self.ax_spec.plot(init_freqs, np.full_like(init_freqs, -80.0), color=COLOR_CYAN, lw=1.5, label="After (Cleaned)")
+        self.line_spec_in, = self.ax_spec.plot(init_freqs, np.full_like(init_freqs, -80.0), color=COLOR_RED, lw=1.1, ls="--", label="Before (Noisy)", alpha=0.85, animated=True)
+        self.line_spec_out, = self.ax_spec.plot(init_freqs, np.full_like(init_freqs, -80.0), color=COLOR_CYAN, lw=1.5, label="After (Cleaned)", animated=True)
         self.line_eq_curve, = self.ax_spec.plot(self.f_eval, np.zeros_like(self.f_eval), color=COLOR_AMBER, lw=1.0, ls=":", label="EQ / Notch Response", alpha=0.7)
 
         # 50 Hz vertical guideline for mains hum detection visualization
         self.hum_guide = self.ax_spec.axvline(50.0, color="#EF4444", linestyle=":", alpha=0.6)
-        self.peak_point, = self.ax_spec.plot([1000], [-80], marker="o", markersize=4, color=COLOR_AMBER, linestyle='None')
-        self.peak_text = self.ax_spec.text(1000, 0, "", color=COLOR_AMBER, fontsize=7, fontweight="bold")
+        self.peak_point, = self.ax_spec.plot([1000], [-80], marker="o", markersize=4, color=COLOR_AMBER, linestyle='None', animated=True)
+        self.peak_text = self.ax_spec.text(1000, 0, "", color=COLOR_AMBER, fontsize=7, fontweight="bold", animated=True)
 
         # Interactive crosshairs and HUD for Spectrum
-        self.crosshair_spec_v = self.ax_spec.axvline(1000, color="#38BDF8", ls="--", lw=0.8, alpha=0.0)
-        self.crosshair_spec_h = self.ax_spec.axhline(0, color="#38BDF8", ls="--", lw=0.8, alpha=0.0)
-        self.pinned_line = self.ax_spec.axvline(0, color="#F59E0B", ls="-.", lw=1.2, alpha=0.0)
-        self.pinned_text = self.ax_spec.text(0, -75, "", color="#F59E0B", fontsize=7, fontweight="bold")
-        self.hud_spec_text = self.ax_spec.text(0.02, 0.90, "", transform=self.ax_spec.transAxes, color="#F8FAFC", fontsize=7, fontweight="bold", bbox=dict(boxstyle="round,pad=0.25", facecolor="#090F1D", edgecolor="#38BDF8", alpha=0.9))
-        self.live_mic_spec_badge = self.ax_spec.text(0.02, 0.05, "", transform=self.ax_spec.transAxes, color="#10B981", fontsize=7, fontweight="bold", bbox=dict(boxstyle="round,pad=0.25", facecolor="#090F1D", edgecolor="#10B981", alpha=0.95))
+        self.crosshair_spec_v = self.ax_spec.axvline(1000, color="#38BDF8", ls="--", lw=0.8, alpha=0.0, animated=True)
+        self.crosshair_spec_h = self.ax_spec.axhline(0, color="#38BDF8", ls="--", lw=0.8, alpha=0.0, animated=True)
+        self.pinned_line = self.ax_spec.axvline(0, color="#F59E0B", ls="-.", lw=1.2, alpha=0.0, animated=True)
+        self.pinned_text = self.ax_spec.text(0, -75, "", color="#F59E0B", fontsize=7, fontweight="bold", animated=True)
+        self.hud_spec_text = self.ax_spec.text(0.02, 0.90, "", transform=self.ax_spec.transAxes, color="#F8FAFC", fontsize=7, fontweight="bold", bbox=dict(boxstyle="round,pad=0.25", facecolor="#090F1D", edgecolor="#38BDF8", alpha=0.9), animated=True)
+        self.live_mic_spec_badge = self.ax_spec.text(0.02, 0.05, "", transform=self.ax_spec.transAxes, color="#10B981", fontsize=7, fontweight="bold", bbox=dict(boxstyle="round,pad=0.25", facecolor="#090F1D", edgecolor="#10B981", alpha=0.95), animated=True)
 
         self.ax_spec.legend(loc="upper right", fontsize=6, facecolor=COLOR_PANEL_BG, edgecolor=COLOR_PANEL_BORDER, labelcolor=COLOR_TEXT_MAIN)
 
@@ -567,7 +579,8 @@ class EqualizerApp:
             interpolation='bilinear',
             vmin=-65.0,
             vmax=-5.0,
-            extent=[-4.0, 0.0, 20, 3600]
+            extent=[-4.0, 0.0, 20, 3600],
+            animated=True
         )
         self.ax_specgram.set_ylim(20, 3600)
         self.ax_specgram.set_xlim(-4.0, 0.0)
@@ -580,10 +593,10 @@ class EqualizerApp:
         self.ax_specgram.axhline(50.0, color="#EF4444", linestyle=":", alpha=0.5)
 
         # Interactive crosshairs and HUD for Spectrogram
-        self.crosshair_gram_v = self.ax_specgram.axvline(0, color="#F43F5E", ls="--", lw=0.8, alpha=0.0)
-        self.crosshair_gram_h = self.ax_specgram.axhline(1000, color="#F43F5E", ls="--", lw=0.8, alpha=0.0)
-        self.hud_gram_text = self.ax_specgram.text(0.02, 0.90, "", transform=self.ax_specgram.transAxes, color="#F8FAFC", fontsize=7, fontweight="bold", bbox=dict(boxstyle="round,pad=0.25", facecolor="#090F1D", edgecolor="#F43F5E", alpha=0.9))
-        self.live_mic_gram_badge = self.ax_specgram.text(0.02, 0.05, "", transform=self.ax_specgram.transAxes, color="#38BDF8", fontsize=7, fontweight="bold", bbox=dict(boxstyle="round,pad=0.25", facecolor="#090F1D", edgecolor="#38BDF8", alpha=0.95))
+        self.crosshair_gram_v = self.ax_specgram.axvline(0, color="#F43F5E", ls="--", lw=0.8, alpha=0.0, animated=True)
+        self.crosshair_gram_h = self.ax_specgram.axhline(1000, color="#F43F5E", ls="--", lw=0.8, alpha=0.0, animated=True)
+        self.hud_gram_text = self.ax_specgram.text(0.02, 0.90, "", transform=self.ax_specgram.transAxes, color="#F8FAFC", fontsize=7, fontweight="bold", bbox=dict(boxstyle="round,pad=0.25", facecolor="#090F1D", edgecolor="#F43F5E", alpha=0.9), animated=True)
+        self.live_mic_gram_badge = self.ax_specgram.text(0.02, 0.05, "", transform=self.ax_specgram.transAxes, color="#38BDF8", fontsize=7, fontweight="bold", bbox=dict(boxstyle="round,pad=0.25", facecolor="#090F1D", edgecolor="#38BDF8", alpha=0.95), animated=True)
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
         self.canvas.draw()
@@ -595,6 +608,7 @@ class EqualizerApp:
         self.canvas.mpl_connect("button_press_event", self._on_plot_mouse_click)
         self.canvas.mpl_connect("button_release_event", self._on_plot_mouse_release)
         self.canvas.mpl_connect("scroll_event", self._on_plot_scroll)
+        self.canvas.mpl_connect("resize_event", self._on_canvas_resize)
 
     def _build_metrics_and_tuner_bar(self, parent):
         # 3 horizontal segments: Musical Tuner (Left), Live Measured Results (Center), Quick Test Injections (Right)
@@ -627,6 +641,7 @@ class EqualizerApp:
         # Animated Cents Needle Canvas (-50 to +50 cents)
         self.tuner_canvas = tk.Canvas(tuner_frame, width=220, height=28, bg=COLOR_BG_DARK, highlightthickness=0)
         self.tuner_canvas.pack(fill=tk.X, pady=1)
+        self._init_tuner_gauge()
         self._draw_tuner_gauge(0.0)
 
         # Segment 2: Feature 5 - Measured Results (SNR Improvement & Latency)
@@ -705,40 +720,56 @@ class EqualizerApp:
         )
         self.btn_inject_noise.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
 
-    def _draw_tuner_gauge(self, cents: float):
+    def _init_tuner_gauge(self):
+        self.tuner_canvas.bind("<Configure>", lambda e: self._build_tuner_static_elements(e.width, e.height))
+        self._build_tuner_static_elements(220, 28)
+
+    def _build_tuner_static_elements(self, w: int, h: int):
+        if w < 50:
+            w = 220
+        self.tuner_w = w
+        self.tuner_h = h
+        self.tuner_cx = w // 2
         self.tuner_canvas.delete("all")
-        w = 220
-        h = 28
-        cx = w // 2
 
         # Background track
         self.tuner_canvas.create_rectangle(12, 12, w - 12, 16, fill="#1E293B", outline="")
 
         # In-tune green safe zone (+- 5 cents)
         zone_half = int((5.0 / 50.0) * (w - 24) / 2.0)
-        self.tuner_canvas.create_rectangle(cx - zone_half, 10, cx + zone_half, 18, fill="#065F46", outline="")
+        self.tuner_canvas.create_rectangle(self.tuner_cx - zone_half, 10, self.tuner_cx + zone_half, 18, fill="#065F46", outline="")
 
         # Center zero tick
-        self.tuner_canvas.create_line(cx, 6, cx, 22, fill="#10B981", width=2)
+        self.tuner_canvas.create_line(self.tuner_cx, 6, self.tuner_cx, 22, fill="#10B981", width=2)
 
         # Intermediate ticks (-25 and +25 cents)
-        q1 = cx - int((w - 24) / 4.0)
-        q2 = cx + int((w - 24) / 4.0)
+        q1 = self.tuner_cx - int((w - 24) / 4.0)
+        q2 = self.tuner_cx + int((w - 24) / 4.0)
         self.tuner_canvas.create_line(q1, 10, q1, 18, fill="#475569", width=1)
         self.tuner_canvas.create_line(q2, 10, q2, 18, fill="#475569", width=1)
 
         # Scale labels
         self.tuner_canvas.create_text(16, 22, text="-50¢", fill="#64748B", font=("Segoe UI", 6))
-        self.tuner_canvas.create_text(cx, 5, text="0¢", fill="#10B981", font=("Segoe UI", 6, "bold"))
+        self.tuner_canvas.create_text(self.tuner_cx, 5, text="0¢", fill="#10B981", font=("Segoe UI", 6, "bold"))
         self.tuner_canvas.create_text(w - 16, 22, text="+50¢", fill="#64748B", font=("Segoe UI", 6))
 
-        # Animated needle
+        # Animated needle elements (created once and updated via coords)
+        self.tuner_needle_line = self.tuner_canvas.create_line(self.tuner_cx, 5, self.tuner_cx, 23, fill="#10B981", width=3)
+        self.tuner_needle_poly = self.tuner_canvas.create_polygon(self.tuner_cx - 3, 23, self.tuner_cx + 3, 23, self.tuner_cx, 17, fill="#10B981")
+
+    def _draw_tuner_gauge(self, cents: float):
+        if not hasattr(self, 'tuner_needle_line'):
+            return
+        w = getattr(self, 'tuner_w', 220)
+        cx = getattr(self, 'tuner_cx', w // 2)
         clamped_cents = float(np.clip(cents, -50.0, 50.0))
         needle_x = cx + int((clamped_cents / 50.0) * ((w - 24) / 2.0))
         color = "#10B981" if abs(clamped_cents) <= 5.0 else ("#F59E0B" if abs(clamped_cents) <= 20.0 else "#EF4444")
 
-        self.tuner_canvas.create_line(needle_x, 5, needle_x, 23, fill=color, width=3)
-        self.tuner_canvas.create_polygon(needle_x - 3, 23, needle_x + 3, 23, needle_x, 17, fill=color)
+        self.tuner_canvas.coords(self.tuner_needle_line, needle_x, 5, needle_x, 23)
+        self.tuner_canvas.coords(self.tuner_needle_poly, needle_x - 3, 23, needle_x + 3, 23, needle_x, 17)
+        self.tuner_canvas.itemconfig(self.tuner_needle_line, fill=color)
+        self.tuner_canvas.itemconfig(self.tuner_needle_poly, fill=color)
 
     def _build_eq_panel(self, parent):
         frame = tk.LabelFrame(
@@ -1249,6 +1280,7 @@ class EqualizerApp:
 
         self.mic_vu_canvas = tk.Canvas(vu_box, height=12, bg="#0F172A", highlightthickness=1, highlightbackground="#334155")
         self.mic_vu_canvas.pack(fill=tk.X, pady=1)
+        self._init_mic_vu()
 
         # Card 6: Direct 1-Second Room Noise Calibration Button for Mic
         calib_row = tk.Frame(frame, bg=COLOR_PANEL_BG)
@@ -1427,11 +1459,15 @@ class EqualizerApp:
             self.ax_spec.set_xlim(20, 20000)
             self.ax_spec.set_xticks([20, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 20000])
             self.ax_spec.set_xticklabels(["20", "50", "100", "250", "500", "1k", "2.5k", "5k", "10k", "20k"])
+        self.bg_cache_valid = False
         self.canvas.draw_idle()
 
     # ------------------------------------------------------------------------
     # INTERACTIVE PLOT & SPECTROGRAM CONTROLS
     # ------------------------------------------------------------------------
+
+    def _on_canvas_resize(self, event=None):
+        self.bg_cache_valid = False
 
     def _on_spec_view_changed(self, event=None):
         """Switches spectrogram focus between Vocal Formants, Musical Log, and Wideband."""
@@ -1453,6 +1489,7 @@ class EqualizerApp:
 
         self.specgram_buffer.fill(-80.0)
         self.im_specgram.set_data(self.specgram_buffer)
+        self.bg_cache_valid = False
         self.canvas.draw_idle()
         self.lbl_status.config(text=f"● SPECTROGRAM FOCUS: {mode}", fg=COLOR_CYAN)
 
@@ -1603,6 +1640,7 @@ class EqualizerApp:
         zoom_val = max(zoom_x, zoom_y)
         if hasattr(self, 'lbl_spec_zoom_val'):
             self.lbl_spec_zoom_val.config(text=f"{zoom_val:.1f}x")
+        self.bg_cache_valid = False
         self.canvas.draw_idle()
 
     def _reset_specgram_zoom(self):
@@ -1613,6 +1651,7 @@ class EqualizerApp:
         if hasattr(self, 'lbl_spec_zoom_val'):
             self.lbl_spec_zoom_val.config(text="1.0x")
         self.lbl_status.config(text="● SPECTROGRAM ZOOM RESET TO FULL VIEW (1.0x)", fg=COLOR_CYAN)
+        self.bg_cache_valid = False
         self.canvas.draw_idle()
 
     def _on_plot_scroll(self, event):
@@ -1628,6 +1667,7 @@ class EqualizerApp:
         cmap_name = self.specgram_cmap_var.get()
         try:
             self.im_specgram.set_cmap(cmap_name)
+            self.bg_cache_valid = False
             self.canvas.draw_idle()
             self.lbl_status.config(text=f"● SPECTROGRAM COLORMAP: {cmap_name.upper()}", fg=COLOR_CYAN)
         except Exception:
@@ -1692,6 +1732,7 @@ class EqualizerApp:
                 self.ax_specgram.set_xlim(new_xmin, new_xmax)
                 self.ax_specgram.set_ylim(new_ymin, new_ymax)
                 self._update_specgram_adaptive_ticks()
+                self.bg_cache_valid = False
                 self.canvas.draw_idle()
                 return
 
@@ -1779,6 +1820,7 @@ class EqualizerApp:
                 self.pinned_line.set_alpha(0.0)
                 self.pinned_text.set_text("")
                 self.lbl_interactive_coords.config(text="🖱️ Pin cleared | Hover to inspect f / dB")
+                self.bg_cache_valid = False
                 self.canvas.draw_idle()
                 return
 
@@ -1792,6 +1834,7 @@ class EqualizerApp:
             self.pinned_text.set_position((self.pinned_freq, -76.0))
             self.pinned_text.set_text(txt)
             self.lbl_interactive_coords.config(text=f"📍 Pinned: {self.pinned_freq:.1f} Hz [{note_str}] (Right-click plot to unpin)")
+            self.bg_cache_valid = False
             self.canvas.draw_idle()
 
     def _on_plot_mouse_release(self, event):
@@ -1940,8 +1983,32 @@ class EqualizerApp:
         self._calibrate_noise()
         self.lbl_status.config(text="● RECORDING 1.0s ROOM NOISE FROM MIC FOR SPECTRAL SUBTRACTION...", fg=COLOR_AMBER)
 
+    def _init_mic_vu(self):
+        w = 180
+        h = 12
+        self.mic_vu_bar = self.mic_vu_canvas.create_rectangle(0, 0, 0, h, fill="#10B981", outline="")
+        t30 = int((-30.0 + 60.0) / 60.0 * w)
+        t12 = int((-12.0 + 60.0) / 60.0 * w)
+        t6 = int((-6.0 + 60.0) / 60.0 * w)
+        self.mic_vu_ticks = [
+            self.mic_vu_canvas.create_line(t, 0, t, h, fill="#334155", width=1)
+            for t in [t30, t12, t6]
+        ]
+        self.mic_vu_canvas.bind("<Configure>", self._on_mic_vu_resize)
+
+    def _on_mic_vu_resize(self, event):
+        w = event.width
+        h = event.height
+        t30 = int((-30.0 + 60.0) / 60.0 * w)
+        t12 = int((-12.0 + 60.0) / 60.0 * w)
+        t6 = int((-6.0 + 60.0) / 60.0 * w)
+        if hasattr(self, 'mic_vu_ticks') and len(self.mic_vu_ticks) == 3:
+            for line_id, t in zip(self.mic_vu_ticks, [t30, t12, t6]):
+                self.mic_vu_canvas.coords(line_id, t, 0, t, h)
+
     def _draw_mic_vu(self, db_val: float):
-        self.mic_vu_canvas.delete("all")
+        if not hasattr(self, 'mic_vu_bar'):
+            return
         w = self.mic_vu_canvas.winfo_width()
         if w < 10:
             w = 180
@@ -1950,16 +2017,9 @@ class EqualizerApp:
         clamped_db = float(np.clip(db_val, -60.0, 0.0))
         pct = (clamped_db + 60.0) / 60.0
         bar_w = int(pct * w)
-
-        if bar_w > 0:
-            color = "#10B981" if clamped_db < -18.0 else ("#F59E0B" if clamped_db < -6.0 else "#EF4444")
-            self.mic_vu_canvas.create_rectangle(0, 0, bar_w, h, fill=color, outline="")
-
-        t30 = int((-30.0 + 60.0) / 60.0 * w)
-        t12 = int((-12.0 + 60.0) / 60.0 * w)
-        t6 = int((-6.0 + 60.0) / 60.0 * w)
-        for t in [t30, t12, t6]:
-            self.mic_vu_canvas.create_line(t, 0, t, h, fill="#334155", width=1)
+        color = "#10B981" if clamped_db < -18.0 else ("#F59E0B" if clamped_db < -6.0 else "#EF4444")
+        self.mic_vu_canvas.coords(self.mic_vu_bar, 0, 0, max(0, bar_w), h)
+        self.mic_vu_canvas.itemconfig(self.mic_vu_bar, fill=color)
 
     def _on_tone_selected(self, event=None):
         tone = self.combo_tones.get().lower().replace(" ", "_")
@@ -1986,255 +2046,310 @@ class EqualizerApp:
         notch_resp = self.engine.auto_hum_remover.get_frequency_response(self.f_eval)
         total_resp = eq_resp + filt_resp + notch_resp
         self.line_eq_curve.set_ydata(total_resp)
+        self.bg_cache_valid = False
 
     # ------------------------------------------------------------------------
     # REAL-TIME VISUALIZATION UPDATE LOOP (30-40 FPS)
     # ------------------------------------------------------------------------
 
     def _update_visualizer(self):
-        if not self.is_updating:
+        if not self.is_updating or self._is_rendering:
             return
 
-        data = self.engine.get_latest_visualization_data()
-        if data is not None:
-            raw_in = data['input']
-            raw_out = data['output']
-            win_type = self.selected_window.get()
-            snr_db = data.get('snr_improvement_db', 0.0)
-            latency = data.get('latency', {})
-            hum_detected = data.get('hum_detected', False)
-            hum_status = data.get('hum_status', {})
-            hum_supp_db = data.get('hum_suppression_db', 0.0)
-            noise_calibrating = data.get('noise_calibrating', False)
-            noise_progress = data.get('noise_progress', 0.0)
-            noise_drop_db = data.get('noise_drop_db', 0.0)
-            source_mode = data.get('source_mode', 'demo')
-            mic_db = data.get('mic_db', -100.0)
-            mic_is_speech = data.get('mic_is_speech', False)
-            mic_gain = data.get('mic_gain', 1.0)
-            mic_monitor = data.get('mic_monitor', False)
+        self._is_rendering = True
+        try:
+            self._frame_count += 1
+            throttle_text = (self._frame_count % 3 == 0)
 
-            # 1. Update Waveform Oscilloscope
-            self.line_wave_in.set_ydata(raw_in)
-            self.line_wave_out.set_ydata(raw_out)
+            data = self.engine.get_latest_visualization_data()
+            if data is not None:
+                raw_in = data['input']
+                raw_out = data['output']
+                win_type = self.selected_window.get()
+                snr_db = data.get('snr_improvement_db', 0.0)
+                latency = data.get('latency', {})
+                hum_detected = data.get('hum_detected', False)
+                hum_status = data.get('hum_status', {})
+                hum_supp_db = data.get('hum_suppression_db', 0.0)
+                noise_calibrating = data.get('noise_calibrating', False)
+                noise_progress = data.get('noise_progress', 0.0)
+                noise_drop_db = data.get('noise_drop_db', 0.0)
+                source_mode = data.get('source_mode', 'demo')
+                mic_db = data.get('mic_db', -100.0)
+                mic_is_speech = data.get('mic_is_speech', False)
+                mic_gain = data.get('mic_gain', 1.0)
+                mic_monitor = data.get('mic_monitor', False)
 
-            # 2. Update Frequency Spectrum (FFT) - Feature 6: Before vs. After
-            freqs_in, mag_in, _, _ = compute_spectrum(raw_in, sample_rate=STANDARD_SAMPLE_RATE, window_type=win_type)
-            freqs_out, mag_out, peak_f, peak_db = compute_spectrum(raw_out, sample_rate=STANDARD_SAMPLE_RATE, window_type=win_type)
+                # 1. Update Waveform Oscilloscope (downsampled for silky 60 FPS performance)
+                self.line_wave_in.set_ydata(raw_in[::self.wave_downsample])
+                self.line_wave_out.set_ydata(raw_out[::self.wave_downsample])
 
-            # Cache latest spectra for interactive crosshair inspection tooltips
-            self.latest_freqs_in = freqs_in
-            self.latest_mag_in = mag_in
-            self.latest_freqs_out = freqs_out
-            self.latest_mag_out = mag_out
+                # 2. Update Frequency Spectrum (FFT) - Feature 6: Before vs. After
+                freqs_in, mag_in, _, _ = compute_spectrum(raw_in, sample_rate=STANDARD_SAMPLE_RATE, window_type=win_type)
+                freqs_out, mag_out, peak_f, peak_db = compute_spectrum(raw_out, sample_rate=STANDARD_SAMPLE_RATE, window_type=win_type)
 
-            valid_mask = freqs_out >= 20.0
-            f_plot = freqs_out[valid_mask]
-            m_in_plot = mag_in[valid_mask]
-            m_out_plot = mag_out[valid_mask]
+                # Cache latest spectra for interactive crosshair inspection tooltips
+                self.latest_freqs_in = freqs_in
+                self.latest_mag_in = mag_in
+                self.latest_freqs_out = freqs_out
+                self.latest_mag_out = mag_out
 
-            self.line_spec_in.set_data(f_plot, m_in_plot)
-            self.line_spec_out.set_data(f_plot, m_out_plot)
+                valid_mask = freqs_out >= 20.0
+                f_plot = freqs_out[valid_mask][::2]
+                m_in_plot = mag_in[valid_mask][::2]
+                m_out_plot = mag_out[valid_mask][::2]
 
-            # Update Peak Frequency Marker (ignore sub-audible DC drift < 45 Hz)
-            audible_mask = (freqs_out >= 45.0) & (freqs_out <= 12000.0)
-            if np.any(audible_mask):
-                aud_mag = mag_out[audible_mask]
-                aud_f = freqs_out[audible_mask]
-                max_idx = np.argmax(aud_mag)
-                aud_peak_f = aud_f[max_idx]
-                aud_peak_db = aud_mag[max_idx]
+                self.line_spec_in.set_data(f_plot, m_in_plot)
+                self.line_spec_out.set_data(f_plot, m_out_plot)
 
-                if aud_peak_db > -55.0:
-                    self.peak_point.set_data([aud_peak_f], [aud_peak_db])
-                    if aud_peak_f >= 1000.0:
-                        text_str = f" {aud_peak_f/1000.0:.2f} kHz ({aud_peak_db:.0f} dB)"
+                # Update Peak Frequency Marker (ignore sub-audible DC drift < 45 Hz)
+                audible_mask = (freqs_out >= 45.0) & (freqs_out <= 12000.0)
+                if np.any(audible_mask):
+                    aud_mag = mag_out[audible_mask]
+                    aud_f = freqs_out[audible_mask]
+                    max_idx = np.argmax(aud_mag)
+                    aud_peak_f = aud_f[max_idx]
+                    aud_peak_db = aud_mag[max_idx]
+
+                    if aud_peak_db > -55.0:
+                        self.peak_point.set_data([aud_peak_f], [aud_peak_db])
+                        if aud_peak_f >= 1000.0:
+                            text_str = f" {aud_peak_f/1000.0:.2f} kHz ({aud_peak_db:.0f} dB)"
+                        else:
+                            text_str = f" {aud_peak_f:.0f} Hz ({aud_peak_db:.0f} dB)"
+                        self.peak_text.set_position((aud_peak_f, aud_peak_db + 3.0))
+                        self.peak_text.set_text(text_str)
                     else:
-                        text_str = f" {aud_peak_f:.0f} Hz ({aud_peak_db:.0f} dB)"
-                    self.peak_text.set_position((aud_peak_f, aud_peak_db + 3.0))
-                    self.peak_text.set_text(text_str)
+                        self.peak_point.set_data([], [])
+                        self.peak_text.set_text("")
                 else:
                     self.peak_point.set_data([], [])
                     self.peak_text.set_text("")
-            else:
-                self.peak_point.set_data([], [])
-                self.peak_text.set_text("")
 
-            # 3. Update Feature 4: Live Scrolling Spectrogram (Waterfall)
-            mode = self.specgram_view_mode.get()
-            if "Vocal" in mode:
-                f_min_spec, f_max_spec = 20.0, 3600.0
-            elif "Musical" in mode:
-                f_min_spec, f_max_spec = 20.0, 8000.0
-            else:  # Wideband
-                f_min_spec, f_max_spec = 20.0, 12000.0
+                # 3. Update Feature 4: Live Scrolling Spectrogram (Waterfall)
+                mode = self.specgram_view_mode.get()
+                if "Vocal" in mode:
+                    f_min_spec, f_max_spec = 20.0, 3600.0
+                elif "Musical" in mode:
+                    f_min_spec, f_max_spec = 20.0, 8000.0
+                else:  # Wideband
+                    f_min_spec, f_max_spec = 20.0, 12000.0
 
-            # Suppress DC / mechanical desk rumble (< 28 Hz) for ultra-clean, pristine visualization
-            mag_vis = np.copy(mag_out)
-            low_cut_mask = freqs_out < 28.0
-            mag_vis[low_cut_mask] = -80.0
+                # Suppress DC / mechanical desk rumble (< 28 Hz) for ultra-clean visualization
+                mag_vis = np.copy(mag_out)
+                low_cut_mask = freqs_out < 28.0
+                mag_vis[low_cut_mask] = -80.0
 
-            # High-resolution frequency interpolation onto waterfall matrix
-            mask_spec = (freqs_out >= f_min_spec) & (freqs_out <= f_max_spec)
-            target_f = np.linspace(f_min_spec, f_max_spec, self.specgram_bins)
-            if np.any(mask_spec):
-                spec_slice = np.interp(target_f, freqs_out[mask_spec], mag_vis[mask_spec])
-            else:
-                spec_slice = np.full(self.specgram_bins, -80.0, dtype=np.float32)
-
-            # Apply user visual sensitivity gain boost
-            spec_slice = spec_slice + float(self.specgram_gain_var.get())
-
-            # Only advance waterfall if not frozen
-            if not self.specgram_frozen:
-                self.specgram_buffer = np.roll(self.specgram_buffer, -1, axis=1)
-                self.specgram_buffer[:, -1] = spec_slice.astype(np.float32)
-                self.im_specgram.set_data(self.specgram_buffer)
-
-            # 4. Update Feature 3: Live Pitch & Note Display (Tuner)
-            pitch_hz, note_name, cents = detect_pitch(raw_out, sample_rate=STANDARD_SAMPLE_RATE)
-            if pitch_hz > 45.0:
-                self.smoothed_cents = 0.70 * self.smoothed_cents + 0.30 * cents
-                self.smoothed_pitch = 0.70 * self.smoothed_pitch + 0.30 * pitch_hz
-                self.lbl_note.config(text=note_name, fg=COLOR_GREEN if abs(self.smoothed_cents) <= 5.0 else COLOR_AMBER)
-                self.lbl_pitch_hz.config(text=f"Freq: {self.smoothed_pitch:.1f} Hz")
-
-                if abs(self.smoothed_cents) <= 5.0:
-                    status_text = "● IN TUNE (±5¢)"
-                    status_color = COLOR_GREEN
-                elif self.smoothed_cents < 0:
-                    status_text = f"♭ Flat ({self.smoothed_cents:.1f}¢)"
-                    status_color = COLOR_AMBER
+                # High-resolution frequency interpolation onto waterfall matrix
+                mask_spec = (freqs_out >= f_min_spec) & (freqs_out <= f_max_spec)
+                target_f = np.linspace(f_min_spec, f_max_spec, self.specgram_bins)
+                if np.any(mask_spec):
+                    spec_slice = np.interp(target_f, freqs_out[mask_spec], mag_vis[mask_spec])
                 else:
-                    status_text = f"♯ Sharp (+{self.smoothed_cents:.1f}¢)"
-                    status_color = COLOR_RED
-                self.lbl_tuner_status.config(text=status_text, fg=status_color)
-                self._draw_tuner_gauge(self.smoothed_cents)
-            else:
-                self.lbl_note.config(text="--", fg=COLOR_TEXT_MUTED)
-                self.lbl_pitch_hz.config(text="Freq: -- Hz")
-                self.lbl_tuner_status.config(text="Tuning: Unvoiced / Idle", fg=COLOR_TEXT_MUTED)
-                self._draw_tuner_gauge(0.0)
+                    spec_slice = np.full(self.specgram_bins, -80.0, dtype=np.float32)
 
-            # 5. Update Feature 5: Measured Results (SNR Improvement & Latency)
-            self.smoothed_snr_db = 0.85 * self.smoothed_snr_db + 0.15 * snr_db
-            snr_sign = "+" if self.smoothed_snr_db > 0 else ""
-            self.lbl_snr_val.config(text=f"{snr_sign}{self.smoothed_snr_db:.1f} dB")
+                # Apply user visual sensitivity gain boost
+                spec_slice = spec_slice + float(self.specgram_gain_var.get())
 
-            tot_lat = latency.get("total_latency_ms", 47.3)
-            buf_lat = latency.get("buffer_latency_ms", 46.4)
-            dsp_lat = latency.get("dsp_compute_ms", 0.9)
-            self.lbl_lat_val.config(text=f"{tot_lat:.1f} ms")
-            self.lbl_device_info.config(text=f"fs={STANDARD_SAMPLE_RATE}Hz | Buffer={buf_lat:.1f}ms | DSP={dsp_lat:.2f}ms | Total={tot_lat:.1f}ms")
+                # Advance waterfall if not frozen
+                if not self.specgram_frozen:
+                    self.specgram_buffer = np.roll(self.specgram_buffer, -1, axis=1)
+                    self.specgram_buffer[:, -1] = spec_slice.astype(np.float32)
+                    self.im_specgram.set_data(self.specgram_buffer)
 
-            self.lbl_hum_supp.config(text=f"-{hum_supp_db:.1f} dB" if hum_supp_db > 0 else "0.0 dB")
-            self.lbl_noise_drop.config(text=f"-{noise_drop_db:.1f} dB" if noise_drop_db > 0 else "0.0 dB")
+                # 4. Feature 3: Live Pitch & Note Display (Tuner)
+                pitch_hz, note_name, cents = detect_pitch(raw_out, sample_rate=STANDARD_SAMPLE_RATE)
+                if pitch_hz > 45.0:
+                    self.smoothed_cents = 0.70 * self.smoothed_cents + 0.30 * cents
+                    self.smoothed_pitch = 0.70 * self.smoothed_pitch + 0.30 * pitch_hz
+                    self._draw_tuner_gauge(self.smoothed_cents)
 
-            # 6. Update Feature 1: Auto Hum Removal Status Badge
-            if hum_detected and self.auto_hum_enabled_var.get():
-                h50 = hum_status.get(50.0, {})
-                prom_50 = h50.get("prominence_db", 0.0)
-                self.lbl_hum_badge.config(
-                    text=f"● 50 Hz HUM DETECTED (+{prom_50:.1f} dB) -> NOTCH FILTER ACTIVE",
-                    fg="#22C55E"
-                )
-            elif hum_detected and not self.auto_hum_enabled_var.get():
-                self.lbl_hum_badge.config(
-                    text="● 50 Hz HUM DETECTED (Filter is currently Bypassed)",
-                    fg="#F59E0B"
-                )
-            else:
-                self.lbl_hum_badge.config(
-                    text="● NO MAINS HUM DETECTED (Mains baseline clear)",
-                    fg=COLOR_TEXT_MUTED
-                )
+                    if throttle_text:
+                        self.lbl_note.config(text=note_name, fg=COLOR_GREEN if abs(self.smoothed_cents) <= 5.0 else COLOR_AMBER)
+                        self.lbl_pitch_hz.config(text=f"Freq: {self.smoothed_pitch:.1f} Hz")
 
-            # 7. Update Feature 2: Noise Calibration Progress
-            if noise_calibrating:
-                pct = int(noise_progress * 100)
-                self.btn_calibrate_nr.config(text=f"⏳ Recording... {pct}%", bg="#D97706")
-                self.lbl_nr_status.config(text=f"Averaging ambient noise spectrum ({pct}% complete)...", fg=COLOR_AMBER)
-            else:
-                self.btn_calibrate_nr.config(text="🎙 Record 1s Noise Sample", bg="#2563EB")
-                if self.engine.noise_reducer.noise_profile is not None:
-                    self.lbl_nr_status.config(
-                        text=f"Profile captured ({self.engine.noise_reducer.frames_needed} frames averaged) | Active",
-                        fg=COLOR_GREEN
-                    )
-                    self.nr_enabled_var.set(self.engine.noise_reducer.enabled)
+                        if abs(self.smoothed_cents) <= 5.0:
+                            status_text = "● IN TUNE (±5¢)"
+                            status_color = COLOR_GREEN
+                        elif self.smoothed_cents < 0:
+                            status_text = f"♭ Flat ({self.smoothed_cents:.1f}¢)"
+                            status_color = COLOR_AMBER
+                        else:
+                            status_text = f"♯ Sharp (+{self.smoothed_cents:.1f}¢)"
+                            status_color = COLOR_RED
+                        self.lbl_tuner_status.config(text=status_text, fg=status_color)
+                else:
+                    self._draw_tuner_gauge(0.0)
+                    if throttle_text:
+                        self.lbl_note.config(text="--", fg=COLOR_TEXT_MUTED)
+                        self.lbl_pitch_hz.config(text="Freq: -- Hz")
+                        self.lbl_tuner_status.config(text="Tuning: Unvoiced / Idle", fg=COLOR_TEXT_MUTED)
 
-            # 8. Update Live Mic Studio Telemetry & Results Displays
-            if hasattr(self, 'lbl_mic_vad'):
-                if source_mode == 'mic':
-                    if mic_is_speech:
-                        self.lbl_mic_vad.config(text="🗣️ Voice Active", fg="#22C55E")
+                # 5. Feature 5: Measured Results (SNR Improvement & Latency)
+                self.smoothed_snr_db = 0.85 * self.smoothed_snr_db + 0.15 * snr_db
+                snr_sign = "+" if self.smoothed_snr_db > 0 else ""
+                tot_lat = latency.get("total_latency_ms", 47.3)
+                buf_lat = latency.get("buffer_latency_ms", 46.4)
+                dsp_lat = latency.get("dsp_compute_ms", 0.9)
+                hum_str = f"-{hum_supp_db:.1f} dB" if hum_supp_db > 0 else "0.0 dB"
+                noise_str = f"-{noise_drop_db:.1f} dB" if noise_drop_db > 0 else "0.0 dB"
+                mon_str = "🔊 Monitor ON" if mic_monitor else "🔇 Safe Muted"
+
+                if throttle_text:
+                    self.lbl_snr_val.config(text=f"{snr_sign}{self.smoothed_snr_db:.1f} dB")
+                    self.lbl_lat_val.config(text=f"{tot_lat:.1f} ms")
+                    self.lbl_device_info.config(text=f"fs={STANDARD_SAMPLE_RATE}Hz | Buffer={buf_lat:.1f}ms | DSP={dsp_lat:.2f}ms | Total={tot_lat:.1f}ms")
+                    self.lbl_hum_supp.config(text=hum_str)
+                    self.lbl_noise_drop.config(text=noise_str)
+
+                    # 6. Feature 1: Auto Hum Removal Status Badge
+                    if hum_detected and self.auto_hum_enabled_var.get():
+                        h50 = hum_status.get(50.0, {})
+                        prom_50 = h50.get("prominence_db", 0.0)
+                        self.lbl_hum_badge.config(
+                            text=f"● 50 Hz HUM DETECTED (+{prom_50:.1f} dB) -> NOTCH FILTER ACTIVE",
+                            fg="#22C55E"
+                        )
+                    elif hum_detected and not self.auto_hum_enabled_var.get():
+                        self.lbl_hum_badge.config(
+                            text="● 50 Hz HUM DETECTED (Filter is currently Bypassed)",
+                            fg="#F59E0B"
+                        )
                     else:
-                        self.lbl_mic_vad.config(text="🤫 Room Silence", fg=COLOR_TEXT_MUTED)
-                    self._draw_mic_vu(mic_db)
-                else:
-                    self.lbl_mic_vad.config(text="-- Standby", fg=COLOR_TEXT_MUTED)
-                    self._draw_mic_vu(-100.0)
+                        self.lbl_hum_badge.config(
+                            text="● NO MAINS HUM DETECTED (Mains baseline clear)",
+                            fg=COLOR_TEXT_MUTED
+                        )
 
-            # Prominently display Live Mic Results in Telemetry HUD and In-Graph Badges
-            hum_str = f"-{hum_supp_db:.1f} dB" if hum_supp_db > 0 else "0.0 dB"
-            noise_str = f"-{noise_drop_db:.1f} dB" if noise_drop_db > 0 else "0.0 dB"
-            mon_str = "🔊 Monitor ON" if mic_monitor else "🔇 Safe Muted"
+                    # 7. Feature 2: Noise Calibration Progress
+                    if noise_calibrating:
+                        pct = int(noise_progress * 100)
+                        self.btn_calibrate_nr.config(text=f"⏳ Recording... {pct}%", bg="#D97706")
+                        self.lbl_nr_status.config(text=f"Averaging ambient noise spectrum ({pct}% complete)...", fg=COLOR_AMBER)
+                    else:
+                        self.btn_calibrate_nr.config(text="🎙 Record 1s Noise Sample", bg="#2563EB")
+                        if self.engine.noise_reducer.noise_profile is not None:
+                            self.lbl_nr_status.config(
+                                text=f"Profile captured ({self.engine.noise_reducer.frames_needed} frames averaged) | Active",
+                                fg=COLOR_GREEN
+                            )
+                            self.nr_enabled_var.set(self.engine.noise_reducer.enabled)
 
-            if source_mode == 'mic':
-                self.btn_live_mic_toggle.config(text="🎙️ Live Mic Studio: ON", bg="#15803D", fg="#FFFFFF")
-                if hasattr(self, 'btn_mic_activate'):
-                    self.btn_mic_activate.config(text="⏹ Disengage Mic", bg="#DC2626", fg="#FFFFFF")
-                    self.lbl_mic_badge.config(text="● LIVE MIC ACTIVE", fg="#22C55E")
+                # 8. Live Mic VU Meter (updated smoothly every frame)
+                if hasattr(self, 'lbl_mic_vad'):
+                    if source_mode == 'mic':
+                        if throttle_text:
+                            if mic_is_speech:
+                                self.lbl_mic_vad.config(text="🗣️ Voice Active", fg="#22C55E")
+                            else:
+                                self.lbl_mic_vad.config(text="🤫 Room Silence", fg=COLOR_TEXT_MUTED)
+                        self._draw_mic_vu(mic_db)
+                    else:
+                        if throttle_text:
+                            self.lbl_mic_vad.config(text="-- Standby", fg=COLOR_TEXT_MUTED)
+                        self._draw_mic_vu(-100.0)
 
-                if mic_is_speech and pitch_hz > 45.0:
-                    status_line = (
-                        f"🎙️ LIVE MIC RESULTS: 🗣️ Voice Active ({mic_db:.1f} dBFS) | Note: {note_name} ({self.smoothed_pitch:.1f} Hz, {self.smoothed_cents:+.1f}¢) "
-                        f"| SNR Gain: {snr_sign}{self.smoothed_snr_db:.1f} dB | Hum Notch: {hum_str} | Noise Drop: {noise_str} | Latency: {tot_lat:.1f} ms"
-                    )
-                    hud_color = "#22C55E"
-                elif mic_is_speech:
-                    status_line = (
-                        f"🎙️ LIVE MIC RESULTS: 🗣️ Voice Formants Active ({mic_db:.1f} dBFS) | Peak: {peak_f:.0f} Hz ({peak_db:.0f} dBFS) "
-                        f"| SNR Gain: {snr_sign}{self.smoothed_snr_db:.1f} dB | Noise Drop: {noise_str} | Latency: {tot_lat:.1f} ms"
-                    )
-                    hud_color = "#10B981"
-                else:
-                    status_line = (
-                        f"🎙️ LIVE MIC RESULTS: 🤫 Room Silence ({mic_db:.1f} dBFS) | Room Noise Suppressed: {noise_str} | 50Hz Hum: {hum_str} "
-                        f"| Preamp: {mic_gain:.2f}x | {mon_str} | Latency: {tot_lat:.1f} ms"
-                    )
-                    hud_color = "#38BDF8"
+                # Live Mic Telemetry HUD and In-Graph Badges
+                if throttle_text:
+                    if source_mode == 'mic':
+                        self.btn_live_mic_toggle.config(text="🎙️ Live Mic Studio: ON", bg="#15803D", fg="#FFFFFF")
+                        if hasattr(self, 'btn_mic_activate'):
+                            self.btn_mic_activate.config(text="⏹ Disengage Mic", bg="#DC2626", fg="#FFFFFF")
+                            self.lbl_mic_badge.config(text="● LIVE MIC ACTIVE", fg="#22C55E")
 
-                self.lbl_mic_hud_results.config(text=status_line, fg=hud_color)
+                        if mic_is_speech and pitch_hz > 45.0:
+                            status_line = (
+                                f"🎙️ LIVE MIC RESULTS: 🗣️ Voice Active ({mic_db:.1f} dBFS) | Note: {note_name} ({self.smoothed_pitch:.1f} Hz, {self.smoothed_cents:+.1f}¢) "
+                                f"| SNR Gain: {snr_sign}{self.smoothed_snr_db:.1f} dB | Hum Notch: {hum_str} | Noise Drop: {noise_str} | Latency: {tot_lat:.1f} ms"
+                            )
+                            hud_color = "#22C55E"
+                        elif mic_is_speech:
+                            status_line = (
+                                f"🎙️ LIVE MIC RESULTS: 🗣️ Voice Formants Active ({mic_db:.1f} dBFS) | Peak: {peak_f:.0f} Hz ({peak_db:.0f} dBFS) "
+                                f"| SNR Gain: {snr_sign}{self.smoothed_snr_db:.1f} dB | Noise Drop: {noise_str} | Latency: {tot_lat:.1f} ms"
+                            )
+                            hud_color = "#10B981"
+                        else:
+                            status_line = (
+                                f"🎙️ LIVE MIC RESULTS: 🤫 Room Silence ({mic_db:.1f} dBFS) | Room Noise Suppressed: {noise_str} | 50Hz Hum: {hum_str} "
+                                f"| Preamp: {mic_gain:.2f}x | {mon_str} | Latency: {tot_lat:.1f} ms"
+                            )
+                            hud_color = "#38BDF8"
 
-                # Floating In-Graph Badges (using clean ASCII to eliminate DejaVu Sans font glyph warnings and terminal I/O latency)
-                spec_badge = f"[MIC] Peak {peak_f:.0f} Hz ({peak_db:.0f} dB) | SNR: {snr_sign}{self.smoothed_snr_db:.1f} dB | Hum: {hum_str}"
-                self.live_mic_spec_badge.set_text(spec_badge)
-                self.live_mic_spec_badge.set_visible(True)
+                        self.lbl_mic_hud_results.config(text=status_line, fg=hud_color)
 
-                gram_status = "VOICE ACTIVE" if mic_is_speech else "ROOM SILENCE"
-                gram_badge = f"[MIC] [{gram_status}] ({mic_db:.1f} dBFS) | Noise Drop: {noise_str}"
-                self.live_mic_gram_badge.set_text(gram_badge)
-                self.live_mic_gram_badge.set_visible(True)
+                        spec_badge = f"[MIC] Peak {peak_f:.0f} Hz ({peak_db:.0f} dB) | SNR: {snr_sign}{self.smoothed_snr_db:.1f} dB | Hum: {hum_str}"
+                        self.live_mic_spec_badge.set_text(spec_badge)
+                        self.live_mic_spec_badge.set_visible(True)
 
-            else:
-                self.btn_live_mic_toggle.config(text="🎙️ Live Mic Studio: OFF", bg="#1E293B", fg="#10B981")
-                if hasattr(self, 'btn_mic_activate'):
-                    self.btn_mic_activate.config(text="🎙️ Activate Mic", bg="#1E293B", fg="#10B981")
-                    self.lbl_mic_badge.config(text="● STANDBY", fg=COLOR_TEXT_MUTED)
+                        gram_status = "VOICE ACTIVE" if mic_is_speech else "ROOM SILENCE"
+                        gram_badge = f"[MIC] [{gram_status}] ({mic_db:.1f} dBFS) | Noise Drop: {noise_str}"
+                        self.live_mic_gram_badge.set_text(gram_badge)
+                        self.live_mic_gram_badge.set_visible(True)
 
-                self.lbl_mic_hud_results.config(
-                    text=f"● DSP TELEMETRY (Demo Track): [Note: {self.lbl_note.cget('text')} | SNR Gain: {snr_sign}{self.smoothed_snr_db:.1f} dB | Hum: {hum_str} | Latency: {tot_lat:.1f} ms | Press [M] for Live Mic]",
-                    fg=COLOR_CYAN
-                )
-                self.live_mic_spec_badge.set_visible(False)
-                self.live_mic_gram_badge.set_visible(False)
+                    else:
+                        self.btn_live_mic_toggle.config(text="🎙️ Live Mic Studio: OFF", bg="#1E293B", fg="#10B981")
+                        if hasattr(self, 'btn_mic_activate'):
+                            self.btn_mic_activate.config(text="🎙️ Activate Mic", bg="#1E293B", fg="#10B981")
+                            self.lbl_mic_badge.config(text="● STANDBY", fg=COLOR_TEXT_MUTED)
 
-            # Redraw canvas efficiently
+                        self.lbl_mic_hud_results.config(
+                            text=f"● DSP TELEMETRY (Demo Track): [Note: {self.lbl_note.cget('text')} | SNR Gain: {snr_sign}{self.smoothed_snr_db:.1f} dB | Hum: {hum_str} | Latency: {tot_lat:.1f} ms | Press [M] for Live Mic]",
+                            fg=COLOR_CYAN
+                        )
+                        self.live_mic_spec_badge.set_visible(False)
+                        self.live_mic_gram_badge.set_visible(False)
+
+                # HIGH-EFFICIENCY MATPLOTLIB BLITTING
+                if not self.bg_cache_valid or self.bg_wave is None:
+                    self.canvas.draw()
+                    self.bg_wave = self.canvas.copy_from_bbox(self.ax_wave.bbox)
+                    self.bg_spec = self.canvas.copy_from_bbox(self.ax_spec.bbox)
+                    self.bg_specgram = self.canvas.copy_from_bbox(self.ax_specgram.bbox)
+                    self.bg_cache_valid = True
+
+                # Fast blit Waveform Oscilloscope
+                self.canvas.restore_region(self.bg_wave)
+                self.ax_wave.draw_artist(self.line_wave_in)
+                self.ax_wave.draw_artist(self.line_wave_out)
+                self.canvas.blit(self.ax_wave.bbox)
+
+                # Fast blit Spectrum
+                self.canvas.restore_region(self.bg_spec)
+                self.ax_spec.draw_artist(self.line_spec_in)
+                self.ax_spec.draw_artist(self.line_spec_out)
+                self.ax_spec.draw_artist(self.peak_point)
+                self.ax_spec.draw_artist(self.peak_text)
+                if self.crosshair_spec_v.get_alpha() > 0:
+                    self.ax_spec.draw_artist(self.crosshair_spec_v)
+                    self.ax_spec.draw_artist(self.crosshair_spec_h)
+                    self.ax_spec.draw_artist(self.hud_spec_text)
+                if self.pinned_line.get_alpha() > 0:
+                    self.ax_spec.draw_artist(self.pinned_line)
+                    self.ax_spec.draw_artist(self.pinned_text)
+                if self.live_mic_spec_badge.get_visible():
+                    self.ax_spec.draw_artist(self.live_mic_spec_badge)
+                self.canvas.blit(self.ax_spec.bbox)
+
+                # Fast blit Spectrogram
+                self.canvas.restore_region(self.bg_specgram)
+                self.ax_specgram.draw_artist(self.im_specgram)
+                if self.crosshair_gram_v.get_alpha() > 0:
+                    self.ax_specgram.draw_artist(self.crosshair_gram_v)
+                    self.ax_specgram.draw_artist(self.crosshair_gram_h)
+                    self.ax_specgram.draw_artist(self.hud_gram_text)
+                if self.live_mic_gram_badge.get_visible():
+                    self.ax_specgram.draw_artist(self.live_mic_gram_badge)
+                self.canvas.blit(self.ax_specgram.bbox)
+
+        except Exception:
+            # Fallback to full draw if blitting encounters any bbox mismatch during window state changes
+            self.bg_cache_valid = False
             self.canvas.draw_idle()
-
-        # Schedule next update frame (~33ms -> 30 FPS)
-        self.root.after(33, self._update_visualizer)
+        finally:
+            self._is_rendering = False
+            if self.is_updating:
+                self.root.after(35, self._update_visualizer)
 
     def _open_benchmark_modal(self):
         """Feature 5: Full academic DSP benchmark scorecard modal."""
