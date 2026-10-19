@@ -45,6 +45,14 @@ class SignalGenerator:
         self.b5 = 0.0
         self.b6 = 0.0
 
+        # Hum & Noise injection controls (for DSP benchmark and auto-detection testing)
+        self.inject_hum = False
+        self.hum_level = 0.22
+        self.hum_phase = 0.0
+
+        self.inject_noise = False
+        self.noise_level = 0.12
+
     def set_mode(self, mode: str):
         self.mode = mode.lower()
 
@@ -63,7 +71,6 @@ class SignalGenerator:
             phase_array = self.phase + omega * t
             samples = self.amplitude * np.sin(phase_array)
             self.phase = (self.phase + omega * (block_size / float(self.sample_rate))) % (2.0 * np.pi)
-            return samples
 
         elif self.mode == "sweep":
             # Logarithmic frequency chirp
@@ -80,11 +87,9 @@ class SignalGenerator:
 
             samples = self.amplitude * np.sin(inst_phase)
             self.sweep_time = (self.sweep_time + block_size) % total_samples
-            return samples
 
         elif self.mode == "white_noise":
             samples = self.amplitude * np.random.uniform(-1.0, 1.0, block_size)
-            return samples
 
         elif self.mode == "pink_noise":
             # Paul Kellet's refined 1/f pink noise filter
@@ -106,7 +111,7 @@ class SignalGenerator:
             self.b0, self.b1, self.b2, self.b3, self.b4, self.b5, self.b6 = (
                 b0, b1, b2, b3, b4, b5, b6
             )
-            return self.amplitude * out
+            samples = self.amplitude * out
 
         elif self.mode == "chord":
             # Musical A-major chord (440Hz A4, 554.37Hz C#5, 659.25Hz E5, 880Hz A5) + Sub bass (110Hz A2)
@@ -120,10 +125,30 @@ class SignalGenerator:
                 0.15 * np.sin(self.phase * (f5 / 440.0) + f5 * phase_inc)
             )
             self.phase = (self.phase + 2.0 * np.pi * 440.0 * (block_size / float(self.sample_rate))) % (2.0 * np.pi)
-            return self.amplitude * s
+            samples = self.amplitude * s
 
         else:
-            return np.zeros(block_size, dtype=np.float64)
+            samples = np.zeros(block_size, dtype=np.float64)
+
+        # Inject 50 Hz Mains Hum & Harmonics (100 Hz, 150 Hz) for Auto Hum Removal testing
+        if self.inject_hum:
+            w50 = 2.0 * np.pi * 50.0
+            w100 = 2.0 * np.pi * 100.0
+            w150 = 2.0 * np.pi * 150.0
+            hum = (
+                self.hum_level * np.sin(self.hum_phase + w50 * t) +
+                (self.hum_level * 0.45) * np.sin(2.0 * self.hum_phase + w100 * t) +
+                (self.hum_level * 0.25) * np.sin(3.0 * self.hum_phase + w150 * t)
+            )
+            self.hum_phase = (self.hum_phase + w50 * (block_size / float(self.sample_rate))) % (2.0 * np.pi)
+            samples = samples + hum
+
+        # Inject Background Noise (for Spectral Subtraction testing)
+        if self.inject_noise:
+            noise = self.noise_level * np.random.normal(0.0, 1.0, block_size)
+            samples = samples + noise
+
+        return samples
 
 
 class AudioFileReader:
@@ -206,53 +231,73 @@ class AudioFileReader:
 
 def generate_synthetic_demo_track(duration_sec: float = 12.0, fs: int = STANDARD_SAMPLE_RATE) -> np.ndarray:
     """
-    Generates a rich multi-instrument demo track (bassline + chords + drum pulse)
-    for instant DSP testing without requiring external media files.
+    Generates a rich, warm, multi-instrument demo track (warm Rhodes chords + acoustic bass + soft brush)
+    with smooth raised-cosine envelopes, zero phase jumps, and seamless circular looping.
+    Eliminates harsh 7 kHz white noise bursts and artificial delayed re-triggers.
     """
     total_samples = int(duration_sec * fs)
     t = np.arange(total_samples) / float(fs)
     audio = np.zeros(total_samples, dtype=np.float64)
 
-    # Chord progression: Am (440, 523, 659) -> F (349, 440, 523) -> C (261, 329, 392) -> G (392, 493, 587)
-    chords = [
-        ([220.0, 440.0, 523.25, 659.25], 110.0),  # Am + A2 bass
-        ([174.61, 349.23, 440.0, 523.25], 87.31),  # F + F2 bass
-        ([130.81, 261.63, 329.63, 392.0], 65.41),  # C + C2 bass
-        ([196.0, 392.0, 493.88, 587.33], 98.0),   # G + G2 bass
+    # Chords: Am7 (A2, C3, E3, G3, C4) -> Fmaj7 (F2, C3, E3, A3, C4) -> Cmaj7 (C2, G2, E3, G3, B3) -> Gadd9 (G2, D3, G3, B3, D4)
+    chord_data = [
+        ([110.0, 130.81, 164.81, 196.00, 261.63], 55.0),   # Am7 + A1 sub
+        ([87.31, 130.81, 164.81, 220.00, 261.63], 43.65),  # Fmaj7 + F1 sub
+        ([65.41, 98.00, 164.81, 196.00, 246.94], 32.70),   # Cmaj7 + C1 sub
+        ([98.00, 146.83, 196.00, 246.94, 293.66], 49.00),  # Gadd9 + G1 sub
     ]
 
-    beat_sec = 0.5  # 120 BPM
-    bar_sec = beat_sec * 4.0
+    chord_sec = 3.0
 
-    for i, (chord_freqs, bass_freq) in enumerate(chords):
-        t_start = i * 3.0
-        t_end = (i + 1) * 3.0
-        idx_mask = (t >= t_start) & (t < t_end)
-        t_local = t[idx_mask] - t_start
+    for i, (notes, sub_bass) in enumerate(chord_data):
+        t_start = i * chord_sec
+        t_end = (i + 1) * chord_sec
+        mask = (t >= t_start) & (t < t_end)
+        tl = t[mask] - t_start
+        n_seg = len(tl)
 
-        # Warm synth pad
-        pad = np.zeros_like(t_local)
-        for f in chord_freqs:
-            pad += 0.08 * np.sin(2.0 * np.pi * f * t_local)
-            pad += 0.03 * np.sin(2.0 * np.pi * (2.0 * f) * t_local)
+        # Smooth ADSR envelope: 25ms raised-cosine attack, gentle decay, 40ms smooth release
+        env = np.ones(n_seg, dtype=np.float64)
+        att_len = int(0.025 * fs)
+        rel_len = int(0.040 * fs)
+        if n_seg > (att_len + rel_len):
+            env[:att_len] = 0.5 * (1.0 - np.cos(np.pi * np.arange(att_len) / att_len))
+            env[-rel_len:] = 0.5 * (1.0 + np.cos(np.pi * np.arange(rel_len) / rel_len))
 
-        # Deep Bass with envelope
-        bass_env = np.exp(-1.5 * (t_local % 1.5))
-        bass = 0.25 * bass_env * np.sin(2.0 * np.pi * bass_freq * t_local)
+        # Warm electric piano / Rhodes harmonics with natural decay
+        chord_wave = np.zeros(n_seg, dtype=np.float64)
+        for freq in notes:
+            note_decay = np.exp(-0.35 * tl)
+            tone = (
+                0.12 * np.sin(2.0 * np.pi * freq * tl) +
+                0.045 * np.sin(2.0 * np.pi * 2.0 * freq * tl) * np.exp(-0.75 * tl) +
+                0.015 * np.sin(2.0 * np.pi * 3.0 * freq * tl) * np.exp(-1.4 * tl)
+            )
+            chord_wave += tone * note_decay
 
-        audio[idx_mask] += pad + bass
+        # Smooth warm acoustic bassline that follows the chord progression naturally
+        bass_decay = np.exp(-0.45 * tl)
+        bass = 0.18 * np.sin(2.0 * np.pi * sub_bass * tl) * bass_decay
 
-    # Rhythm hi-hat pulse (high frequencies)
-    hat_period = int(beat_sec * fs / 2.0)
-    for h in range(0, total_samples, hat_period):
-        h_len = min(int(0.04 * fs), total_samples - h)
-        if h_len > 0:
-            env = np.linspace(1.0, 0.0, h_len) ** 3
-            noise = np.random.uniform(-1.0, 1.0, h_len)
-            # High-pass filter for hi-hat sizzle
-            b, a = signal.butter(2, 7000.0, btype='high', fs=fs)
-            sizzle = signal.lfilter(b, a, noise)
-            audio[h:h + h_len] += 0.12 * env * sizzle
+        audio[mask] += (chord_wave + bass) * env
+
+    # Soft, organic acoustic brush rhythm (every beat = 0.5s)
+    beat_samples = int(0.5 * fs)
+    for b in range(0, total_samples, beat_samples):
+        b_len = min(int(0.035 * fs), total_samples - b)
+        if b_len > 10:
+            # Soft windowed noise in warm 2.5 kHz - 4.5 kHz band (no harsh 7 kHz bursts)
+            w_brush = np.sin(np.pi * np.arange(b_len) / b_len) ** 2
+            rnd = np.random.uniform(-1.0, 1.0, b_len)
+            sos_brush = signal.butter(2, [2500.0, 4500.0], btype='bandpass', fs=fs, output='sos')
+            filtered_brush = signal.sosfilt(sos_brush, rnd)
+            audio[b:b + b_len] += 0.030 * w_brush * filtered_brush
+
+    # Seamless circular loop crossfade at ends (50ms)
+    fade_len = int(0.05 * fs)
+    fade_in = 0.5 * (1.0 - np.cos(np.pi * np.arange(fade_len) / fade_len))
+    audio[:fade_len] *= fade_in
+    audio[-fade_len:] *= fade_in[::-1]
 
     # Normalize to -3 dB peak
     peak = np.max(np.abs(audio))

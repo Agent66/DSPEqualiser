@@ -15,6 +15,10 @@ from spequaliser.dsp import (
     MultiBandEqualizer,
     detect_pitch,
     SpectralNoiseReducer,
+    AutoHumRemover,
+    compute_snr_improvement,
+    measure_dsp_latency,
+    run_full_dsp_benchmark,
     detect_vad,
     VoiceActivityDetector,
     compute_energy,
@@ -144,6 +148,61 @@ class TestDSP(unittest.TestCase):
         act5, _, _ = vad.process_block(silence_chunk)
         self.assertFalse(act5)
 
+    def test_auto_hum_removal(self):
+        fs = STANDARD_SAMPLE_RATE
+        remover = AutoHumRemover(sample_rate=fs, q=25.0)
+        remover.enabled = True
+        n = 2048
+
+        # Stream continuous contiguous frames to confirm detection and steady-state notch attenuation
+        for i in range(8):
+            t = (i * n + np.arange(n)) / float(fs)
+            clean_audio = 0.50 * np.sin(2.0 * np.pi * 1000.0 * t)
+            hum_50 = 0.30 * np.sin(2.0 * np.pi * 50.0 * t)
+            noisy_audio = clean_audio + hum_50
+            cleaned = remover.process_block(noisy_audio)
+
+        self.assertTrue(remover.hum_detected)
+        self.assertTrue(remover.detected_harmonics[50.0]["detected"])
+
+        # Check notch suppression on steady-state block
+        w = signal.windows.hann(n, sym=False)
+        fft_in = np.abs(np.fft.rfft(noisy_audio * w, n=8192))
+        fft_out = np.abs(np.fft.rfft(cleaned * w, n=8192))
+        freqs = np.fft.rfftfreq(8192, 1.0 / fs)
+        bin_50 = np.argmin(np.abs(freqs - 50.0))
+        supp_db = 20.0 * np.log10(max(fft_in[bin_50], 1e-9) / max(fft_out[bin_50], 1e-9))
+        self.assertTrue(supp_db >= 20.0)
+
+    def test_spectral_subtraction_calibration(self):
+        fs = STANDARD_SAMPLE_RATE
+        denoiser = SpectralNoiseReducer(sample_rate=fs, block_size=2048, alpha=2.0, beta=0.03)
+        np.random.seed(42)
+        noise_1s = 0.2 * np.random.normal(0, 1, fs)
+        denoiser.record_noise_sample(noise_1s)
+        self.assertTrue(denoiser.enabled)
+        self.assertIsNotNone(denoiser.noise_profile)
+
+        # Clean a noisy block
+        t = np.arange(2048) / float(fs)
+        signal_tone = 0.5 * np.sin(2.0 * np.pi * 440.0 * t)
+        noisy = signal_tone + 0.2 * np.random.normal(0, 1, 2048)
+        cleaned = denoiser.process_block(noisy)
+        snr_gain = compute_snr_improvement(noisy, cleaned)
+        self.assertTrue(snr_gain > 0.0)
+
+    def test_measured_results_and_latency(self):
+        lat = measure_dsp_latency(block_size=2048, sample_rate=STANDARD_SAMPLE_RATE)
+        self.assertIn("buffer_latency_ms", lat)
+        self.assertIn("dsp_compute_ms", lat)
+        self.assertIn("total_latency_ms", lat)
+        self.assertTrue(lat["total_latency_ms"] < 60.0)
+
+        bench = run_full_dsp_benchmark(sample_rate=STANDARD_SAMPLE_RATE, block_size=2048)
+        self.assertTrue(bench["hum_50hz_suppression_db"] > 20.0)
+        self.assertTrue(bench["snr_improvement_db"] > 4.0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
