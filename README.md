@@ -114,6 +114,7 @@ DSPEqualiser/
 ├── receiver.py                 # Encrypted Audio Receiver (UDP + Decrypt + Jitter Buffer + Playback + GUI)
 ├── verify_dsp.py               # Complete mathematical validation suite for all 9 DSP objectives
 ├── shared_secret.key           # Generated 256-bit AES symmetric key
+├── Spectrogram_Tutorial.md     # Complete visual guide on how to read and interpret audio spectrograms
 ├── spequaliser/
 │   ├── __init__.py             # Package exports and version metadata (v1.1.0)
 │   ├── dsp.py                  # Core DSP: Filters, SOS continuity, Auto Hum, Spectral Subtraction, VAD, Pitch
@@ -183,9 +184,32 @@ python main.py
 5. **Pitch Tuner & Live Spectrogram**:
    - Speak or sing into the microphone or play a sine wave to observe the real-time Pitch Tuner needle gauge display the fundamental frequency $F_0$, musical note, and cents deviation.
    - Watch the scrolling waterfall Spectrogram display continuous time-frequency evolution.
+   - **Interactive Spectrogram Tools**: Focus frequency mode (*🎙️ Vocal Formants 20–3.6 kHz*, *🎵 Musical Log 20–8 kHz*, *⚡ Wideband 20–12 kHz*), colormap palette selector (*magma, viridis, plasma, inferno, turbo, cividis*), visual sensitivity slider, mouse wheel zoom, click-and-drag panning, hover crosshairs, and waterfall freeze (`[F]`).
+   - 📖 **Complete Guide**: See the dedicated [Spectrogram_Tutorial.md](Spectrogram_Tutorial.md) for detailed pattern recognition and acoustic analysis instructions.
 6. **Measured Results & Academic Benchmark (Card 4)**:
    - Live telemetry monitors **SNR Improvement (dB)** and **End-to-End Latency Breakdown (ms)**.
    - Click **📊 Run Academic Benchmark** to generate a full formal DSP evaluation report directly in a popup dialog.
+
+---
+
+## Spectrogram Reading Guide (Visual Cheat Sheet)
+
+The real-time scrolling waterfall spectrogram displays three acoustic dimensions simultaneously:
+- **X-Axis (Time)**: From past ($-4.0\text{ s}$ on the left) to present ($0.0\text{ s}$ live on the right).
+- **Y-Axis (Frequency)**: Pitch and tone, from Sub-Bass ($20\text{ Hz}$) at the bottom to Treble ($12\text{ kHz}$) at the top.
+- **Color Scale (Magnitude)**: Signal power in dBFS — Dark Purple/Black ($-80\text{ dBFS}$, silence/noise floor) to Bright Orange/Yellow/White ($0\text{ dBFS}$, peak signal energy).
+
+| Visual Pattern | Acoustic Meaning | How to Test in the App |
+|---|---|---|
+| **Single sharp horizontal line** | Pure sine wave (single frequency) | Set Source to `Generator` $\to$ `Sine` |
+| **Grid of steady horizontal lines at 50, 100, 150 Hz** | Mains hum & electrical transformer leakage | Click `⚡ Inject 50 Hz Hum` |
+| **Stacked parallel bands (ladder rungs)** | Voiced vowels, vocal cords, singing ("Ah", "Ee") | Speak into `Live Mic` or play `Demo Track` |
+| **Cloudy diffuse noise patch (>3 kHz)** | Unvoiced consonants ("S", "Sh", "F") | Make an "SSSS" sound into microphone |
+| **Sharp vertical streak through all frequencies** | Percussion hit, pick attack, click transient | Tap desk or snap fingers near mic |
+| **Diagonal line sloping upwards/downwards** | Frequency chirp / siren sweep | Set Source to `Generator` $\to$ `Chirp` |
+| **Uniform grainy background speckling** | Ambient room noise / thermal circuit hiss | Click `⚡ Inject Noise` $\to$ test `Record 1s Noise` |
+
+👉 **For the complete in-depth guide with ASCII diagrams, vocal formant physics, and interactive shortcuts, see [Spectrogram_Tutorial.md](Spectrogram_Tutorial.md).**
 
 ---
 
